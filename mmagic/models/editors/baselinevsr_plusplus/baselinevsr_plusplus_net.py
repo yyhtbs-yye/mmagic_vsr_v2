@@ -12,8 +12,8 @@ from mmagic.registry import MODELS
 from ..basicvsr.basicvsr_net import ResidualBlocksWithInputConv, SPyNet
 
 @MODELS.register_module()
-class BaselineVSRNet(BaseModule):
-    """BaselineVSR network structure.
+class BaselineVSRPlusPlusNet(BaseModule):
+    """BaselineVSRPlusPlus network structure.
 
     Support either x4 upsampling or same size output.
 
@@ -157,21 +157,21 @@ class BaselineVSRNet(BaseModule):
                 frames = [feats[prev_name][idx], 
                           feats[prev_name][idx], 
                           feats[prev_name][idx + 1]]
-                backward_flow = backward_flows[:, 0, :, :, :]
-                cond_n1 = flow_warp(frames[2], backward_flow.permute(0, 2, 3, 1))
+                backward_flow_n1 = backward_flows[:, 0, :, :, :]
+                cond_n1 = flow_warp(frames[2], backward_flow_n1.permute(0, 2, 3, 1))
                 cond = torch.cat([cond_n1, frames[1]], dim=1)
                 prop = frames[2]
-                frames[2] = self.deform_align[module_name](prop, cond, backward_flow)  # Only next frame needs warping
+                frames[2] = self.deform_align[module_name](prop, cond, backward_flow_n1)  # Only next frame needs warping
             elif idx == t:
                 # For the last frame, only use previous frame x[0] and current frame x[1]
                 frames = [feats[prev_name][idx - 1], 
                           feats[prev_name][idx], 
                           feats[prev_name][idx]]
-                forward_flow = forward_flows[:, t - 1, :, :, :] # len(forward_flows)=t, last element is idx=t-1
-                cond_n1 = flow_warp(frames[0], forward_flow.permute(0, 2, 3, 1))
+                forward_flow_n1 = forward_flows[:, t - 1, :, :, :] # len(forward_flows)=t, last element is idx=t-1
+                cond_n1 = flow_warp(frames[0], forward_flow_n1.permute(0, 2, 3, 1))
                 cond = torch.cat([cond_n1, frames[1]], dim=1)
                 prop = frames[0]
-                frames[0] = self.deform_align[module_name](prop, cond, forward_flow)  # Only previous frame needs warping
+                frames[0] = self.deform_align[module_name](prop, cond, forward_flow_n1)  # Only previous frame needs warping
             else:
                 # For other frames, use previous x[0]
                 # , current x[1], and next frames x[2]
@@ -179,20 +179,20 @@ class BaselineVSRNet(BaseModule):
                           feats[prev_name][idx], 
                           feats[prev_name][idx + 1]]
                 
-                forward_flow = forward_flows[:, idx - 1, :, :, :]   # idx=1 -> forward flow index=0
-                backward_flow = backward_flows[:, idx, :, :, :]     # idx=1 -> backward flow index=1
+                forward_flow_n1 = forward_flows[:, idx - 1, :, :, :]   # idx=1 -> forward flow index=0
+                backward_flow_n1 = backward_flows[:, idx, :, :, :]     # idx=1 -> backward flow index=1
                 
                 # x[0] -> x[1], using forward
-                cond_n1_f = flow_warp(frames[0], forward_flow.permute(0, 2, 3, 1))
+                cond_n1_f = flow_warp(frames[0], forward_flow_n1.permute(0, 2, 3, 1))
                 cond_f = torch.cat([cond_n1_f, frames[1]], dim=1)
-                prop_f = frames[0]
-                frames[0] = self.deform_align[module_name](prop_f, cond_f, forward_flow)
+                feat_tcat_f = frames[0]
+                frames[0] = self.deform_align[module_name](feat_tcat_f, cond_f, forward_flow_n1)
                 
                 # x[2] -> x[1], using backward
-                cond_n1_b = flow_warp(frames[2], backward_flow.permute(0, 2, 3, 1))
+                cond_n1_b = flow_warp(frames[2], backward_flow_n1.permute(0, 2, 3, 1))
                 cond_b = torch.cat([cond_n1_b, frames[1]], dim=1)
-                prop_b = frames[2]
-                frames[2] = self.deform_align[module_name](prop_b, cond_b, backward_flow)
+                feat_tcat_b = frames[2]
+                frames[2] = self.deform_align[module_name](feat_tcat_b, cond_b, backward_flow_n1)
 
             feat_tagg = self.tagg[module_name](torch.cat(frames, dim=1))
 

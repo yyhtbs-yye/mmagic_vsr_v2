@@ -11,7 +11,6 @@ from mmagic.models.utils import flow_warp
 from mmagic.registry import MODELS
 from ..basicvsr.basicvsr_net import ResidualBlocksWithInputConv, SPyNet
 
-
 @MODELS.register_module()
 class BisimVSRPlusPlusNet(BaseModule):
 
@@ -152,13 +151,12 @@ class BisimVSRPlusPlusNet(BaseModule):
 
         # Initialize a tensor to store propagated features. The size is determined by
         # the mid-channel dimension of the network architecture.
-        feat_prop_f = forward_flows.new_zeros(n, self.mid_channels, h, w)
 
         prev_feats = [feats[k] for k in feats if k not in ['spatial', module_name]]
         
         feat_new = []
 #-------# Forward iterate (Recurrent!!!) through each frame index to propagate features.
-
+        feat_prop_f = forward_flows.new_zeros(n, self.mid_channels, h, w)
         feats_f = []
         for i, idx in enumerate(frame_idx):
             # Retrieve current frame features.
@@ -166,41 +164,28 @@ class BisimVSRPlusPlusNet(BaseModule):
             # If not the first frame, calculate deformable alignments.
                 # second-order deformable alignment
             if i > 0:
-                # Fetch optical flow for the current (i) and previous frame (i-1).
                 flow_n1 = forward_flows[:, flow_idx[i], :, :, :]
-
-                # First-order warping.
                 cond_n1 = flow_warp(feat_prop_f, flow_n1.permute(0, 2, 3, 1))
 
-                # Initialize tensors for second-order deformable alignment.
                 feat_n2, flow_n2, cond_n2 = torch.zeros_like(feat_prop_f), torch.zeros_like(flow_n1), torch.zeros_like(cond_n1)
 
                 if i > 1:  # Compute second-order features if beyond the second frame.
                     feat_n2 = feats_f[-2]
-
                     flow_n2 = forward_flows[:, flow_idx[i - 1], :, :, :]
-
-                    # Compute second-order optical flow using first-order flow.
                     flow_n2 = flow_n1 + flow_warp(flow_n2, flow_n1.permute(0, 2, 3, 1))
                     cond_n2 = flow_warp(feat_n2, flow_n2.permute(0, 2, 3, 1))
 
-                # Concatenate conditions and features for deformable convolution.
                 cond = torch.cat([cond_n1, feat_current, cond_n2], dim=1)
                 feat_prop_f = torch.cat([feat_prop_f, feat_n2], dim=1)
                 feat_prop_f = self.deform_align_f[module_name](feat_prop_f, cond, flow_n1, flow_n2)
 
-            # Concatenate the current frame's features with those propagated.
             feat_f = [feat_current] + [it[idx] for it in prev_feats] + [feat_prop_f]
-
             feat_f = torch.cat(feat_f, dim=1)
-
-            # Update propagated features by running through a backbone network.
             feat_prop_f = feat_prop_f + self.backbone_f[module_name](feat_f)
             feats_f.append(feat_prop_f)
 
-        feat_prop_b = forward_flows.new_zeros(n, self.mid_channels, h, w)
-
 #-------# Backward iterate (Recurrent!!!) through each frame index to propagate features.
+        feat_prop_b = forward_flows.new_zeros(n, self.mid_channels, h, w)
         feats_b = []
         for i in reversed(frame_idx):
             feat_current = feats['spatial'][i]
@@ -225,8 +210,8 @@ class BisimVSRPlusPlusNet(BaseModule):
             feat_prop_b = feat_prop_b + self.backbone_b[module_name](feat_b)
             feats_b.append(feat_prop_b)
 
+#-------# Aggregatopm of Backward and Forward Aligned Features
         for i in range(t + 1):
-
             feat_new.append(self.bagg[module_name](torch.cat([feats_f[i], feats_b[i]], dim=1)))
 
         feats[module_name] = feat_new

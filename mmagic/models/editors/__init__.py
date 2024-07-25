@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .basicvsr import BasicVSR, BasicVSRNet
 from .baselinevsr import BaselineVSRNet
+from .baselinevsr_plusplus import BaselineVSRPlusPlusNet
 from .bisimvsr_plusplus_net import BisimVSRPlusPlusNet
 from .basicvsr_plusplus_net import BasicVSRPlusPlusNet
 from .edsr import EDSRNet
@@ -42,5 +43,5 @@ __all__ = [
                     'PConvEncoderDecoder', 'PConvInpaintor', 'RDNNet', 'RealBasicVSR', 'RealBasicVSRNet', 'RealESRGAN', 'UNetDiscriminatorWithSpectralNorm', 'SRCNNNet',
                     'SRGAN', 'ModifiedVGG', 'MSRResNet', 'SwinIRNet', 'TDAN', 'TDANNet', 'TOFlowVFINet', 'TOFlowVSRNet', 'ToFResBlock',
     'RVRTNet', 'VRTNet', 'NaiveVSR', 'D3DNet', 'FTVSRNet', 'IARTNet', 'PSRTRecurrentNet', 'FSTRNet', 
-    'D3DUNet', 'D2DNet', 'De3QNet', 'BaselineVSRNet', 'BisimVSRPlusPlusNet',
+    'D3DUNet', 'D2DNet', 'De3QNet', 'BaselineVSRNet', 'BisimVSRPlusPlusNet', 'BaselineVSRPlusPlusNet', 
 ]
