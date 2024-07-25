@@ -2,14 +2,14 @@ import os
 import sys
 
 # Set the CUDA_VISIBLE_DEVICES environment variable
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 # It's assumed that your train.py script processes command line arguments.
 # We'll mimic the command line arguments here.
 sys.argv = [
     'tools/train.py',  # The actual script path to run.
-    '/workspace/mmagic/configs/new_tests/baselinevsrnet_c64n7_8xb1-600k_reds4.py',  # The config file path.
-    '--work-dir', 'work_dirs/baselinevsr_c64b20'  # Additional arguments.
+    '/workspace/mmagic/configs/new_tests/bisimvsr-pp_c64n7_8xb1-600k_reds4.py',  # The config file path.
+    '--work-dir', 'work_dirs/bisimppvsr_c64b20'  # Additional arguments.
 ]
 
 # Now we import the train script. This should be done AFTER setting sys.argv.

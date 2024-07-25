@@ -13,28 +13,7 @@ from ..basicvsr.basicvsr_net import ResidualBlocksWithInputConv, SPyNet
 
 
 @MODELS.register_module()
-class BasicVSRPlusPlusNet(BaseModule):
-    """BasicVSR++ network structure.
-
-    Support either x4 upsampling or same size output.
-
-    Paper:
-        BasicVSR++: Improving Video Super-Resolution with Enhanced Propagation
-        and Alignment
-
-    Args:
-        mid_channels (int, optional): Channel number of the intermediate
-            features. Default: 64.
-        num_blocks (int, optional): The number of residual blocks in each
-            propagation branch. Default: 7.
-        max_residue_magnitude (int): The maximum magnitude of the offset
-            residue (Eq. 6 in paper). Default: 10.
-        is_low_res_input (bool, optional): Whether the input is low-resolution
-            or not. If False, the output resolution is equal to the input
-            resolution. Default: True.
-        spynet_pretrained (str, optional): Pre-trained model path of SPyNet.
-            Default: None.
-    """
+class BisimVSRPlusPlusNet(BaseModule):
 
     def __init__(self,
                  mid_channels=64,
@@ -62,23 +41,31 @@ class BasicVSRPlusPlusNet(BaseModule):
                 ResidualBlocksWithInputConv(mid_channels, mid_channels, 5))
 
         # propagation branches
-        self.deform_align = nn.ModuleDict()
-        self.backbone = nn.ModuleDict()
-        modules = ['backward_1', 'forward_1', 'backward_2', 'forward_2']
-        for i, module in enumerate(modules):
-            self.deform_align[module] = SecondOrderDeformableAlignment(
-                2 * mid_channels,
-                mid_channels,
-                3,
-                padding=1,
-                deform_groups=16,
-                max_residue_magnitude=max_residue_magnitude)
-            self.backbone[module] = ResidualBlocksWithInputConv(
-                (2 + i) * mid_channels, mid_channels, num_blocks)
+        self.deform_align_f, self.deform_align_b = nn.ModuleDict(), nn.ModuleDict()
+        self.backbone_f, self.backbone_b = nn.ModuleDict(), nn.ModuleDict()
 
+        # bi-direction aggregation module. 
+        self.bagg = nn.ModuleDict()
+
+        modules = ['0', '1']
+        for i, module in enumerate(modules):
+            self.deform_align_f[module] = SecondOrderDeformableAlignment(
+                2 * mid_channels, mid_channels, 3,
+                padding=1, deform_groups=16,
+                max_residue_magnitude=max_residue_magnitude)
+            self.deform_align_b[module] = SecondOrderDeformableAlignment(
+                2 * mid_channels, mid_channels, 3,
+                padding=1, deform_groups=16,
+                max_residue_magnitude=max_residue_magnitude)
+            self.backbone_f[module] = ResidualBlocksWithInputConv(
+                (2 + i) * mid_channels, mid_channels, num_blocks)
+            self.backbone_b[module] = ResidualBlocksWithInputConv(
+                (2 + i) * mid_channels, mid_channels, num_blocks)
+            self.bagg[module] = nn.Conv2d(2 * mid_channels, mid_channels, kernel_size=1)
+        
         # upsampling module
         self.reconstruction = ResidualBlocksWithInputConv(
-            5 * mid_channels, mid_channels, 5)
+            (len(modules) + 1) * mid_channels, mid_channels, 5)
         self.upsample1 = PixelShufflePack(
             mid_channels, mid_channels, 2, upsample_kernel=3)
         self.upsample2 = PixelShufflePack(
@@ -137,15 +124,17 @@ class BasicVSRPlusPlusNet(BaseModule):
         else:
             flows_forward = self.spynet(lqs_2, lqs_1).view(n, t - 1, 2, h, w)
 
+        # both flows_forward and flows_backward are of index 0, 1, 2, ... t-1
         return flows_forward, flows_backward
 
-    def propagate(self, feats, flows, module_name):
+    def propagate(self, feats, forward_flows, backward_flows, module_name):
         """Propagate the latent features throughout the sequence.
 
         Args:
             feats dict(list[tensor]): Features from previous branches. Each
                 component is a list of tensors with shape (n, c, h, w).
-            flows (tensor): Optical flows with shape (n, t - 1, 2, h, w).
+            forward_flows (tensor): Optical forward_flows with shape (n, t - 1, 2, h, w).
+            backward_flows (tensor): Optical backward_flows with shape (n, t - 1, 2, h, w).
             module_name (str): The name of the propagation branches. Can either
                 be 'backward_1', 'forward_1', 'backward_2', 'forward_2'.
 
@@ -155,75 +144,92 @@ class BasicVSRPlusPlusNet(BaseModule):
                 propagation branch, which is represented by a list of tensors.
         """
 
-        n, t, _, h, w = flows.size()
+        n, t, _, h, w = forward_flows.size()
 
-        # Initialize indices for frames and flows
+        # Initialize indices for frames and forward_flows
         frame_idx = list(range(0, t + 1))
         flow_idx = list(range(-1, t))
 
-        # Establishes a mapping index for 'spatial' features. Mapping is done in a
-        # ``forward`` and ``backward`` manner to utilize past computed features.
-        mapping_idx = list(range(0, len(feats['spatial'])))
-        mapping_idx += mapping_idx[::-1]
-
-        # Adjust indexing for backward propagation.
-        if 'backward' in module_name:
-            frame_idx = frame_idx[::-1]
-            flow_idx = frame_idx
-
         # Initialize a tensor to store propagated features. The size is determined by
         # the mid-channel dimension of the network architecture.
-        feat_prop = flows.new_zeros(n, self.mid_channels, h, w)
+        feat_prop_f = forward_flows.new_zeros(n, self.mid_channels, h, w)
+
+        prev_feats = [feats[k] for k in feats if k not in ['spatial', module_name]]
         
-        # Iterate (Recurrent!!!) through each frame index to propagate features.
+        feat_new = []
+#-------# Forward iterate (Recurrent!!!) through each frame index to propagate features.
+
+        feats_f = []
         for i, idx in enumerate(frame_idx):
-
             # Retrieve current frame features.
-            feat_current = feats['spatial'][mapping_idx[idx]]
-
-            # the propagating features 'feat_prop' are de facto 1st order propagation 'feat_n1'
-            feat_n1 = feat_prop
-
-            # From the second frame, calculate first-order optical flow for deformable alignments.
+            feat_current = feats['spatial'][idx]
+            # If not the first frame, calculate deformable alignments.
+                # second-order deformable alignment
             if i > 0:
                 # Fetch optical flow for the current (i) and previous frame (i-1).
-                flow_n1 = flows[:, flow_idx[i], :, :, :]
-                cond_n1 = flow_warp(feat_n1, flow_n1.permute(0, 2, 3, 1))
+                flow_n1 = forward_flows[:, flow_idx[i], :, :, :]
 
-                # Initialize tensors for second-order features and offsets.
-                feat_n2, flow_n2, cond_n2 = torch.zeros_like(feat_n1), torch.zeros_like(flow_n1), torch.zeros_like(cond_n1)
+                # First-order warping.
+                cond_n1 = flow_warp(feat_prop_f, flow_n1.permute(0, 2, 3, 1))
 
-                # From the thrid frame, calculate second-order optical flow for deformable alignments.
+                # Initialize tensors for second-order deformable alignment.
+                feat_n2, flow_n2, cond_n2 = torch.zeros_like(feat_prop_f), torch.zeros_like(flow_n1), torch.zeros_like(cond_n1)
+
                 if i > 1:  # Compute second-order features if beyond the second frame.
-                    feat_n2 = feats[module_name][-2] # The position of 'n-2' to match 'n'
-                    flow_n2 = flows[:, flow_idx[i - 1], :, :, :]
+                    feat_n2 = feats_f[-2]
+
+                    flow_n2 = forward_flows[:, flow_idx[i - 1], :, :, :]
+
                     # Compute second-order optical flow using first-order flow.
                     flow_n2 = flow_n1 + flow_warp(flow_n2, flow_n1.permute(0, 2, 3, 1))
                     cond_n2 = flow_warp(feat_n2, flow_n2.permute(0, 2, 3, 1))
 
-                # Concatenate conditions for deformable convolution.
+                # Concatenate conditions and features for deformable convolution.
                 cond = torch.cat([cond_n1, feat_current, cond_n2], dim=1)
-                # Concatenate features for deformable convolution.
-                feat_prop = torch.cat([feat_n1, feat_n2], dim=1)
-                # Use deformable convolution to refine the offset (coarse='flow_n1','flow_n2'),
-                # then apply it to align 'feat_prop'
-                feat_prop = self.deform_align[module_name](feat_prop, cond, flow_n1, flow_n2)
+                feat_prop_f = torch.cat([feat_prop_f, feat_n2], dim=1)
+                feat_prop_f = self.deform_align_f[module_name](feat_prop_f, cond, flow_n1, flow_n2)
 
-            # DenseNet: Concatenate the current frame's features with those propagated from all previous layers.
-            feat = [feat_current] + [feats[k][idx]
-                                      for k in feats if k not in ['spatial', module_name]
-                                    ] + [feat_prop]
+            # Concatenate the current frame's features with those propagated.
+            feat_f = [feat_current] + [it[idx] for it in prev_feats] + [feat_prop_f]
 
-            feat = torch.cat(feat, dim=1)
+            feat_f = torch.cat(feat_f, dim=1)
 
             # Update propagated features by running through a backbone network.
-            feat_prop = feat_prop + self.backbone[module_name](feat)
-            feats[module_name].append(feat_prop)
+            feat_prop_f = feat_prop_f + self.backbone_f[module_name](feat_f)
+            feats_f.append(feat_prop_f)
 
-        # If it's a backward propagation, reverse the order of the features.
-        if 'backward' in module_name:
-            feats[module_name] = feats[module_name][::-1]
+        feat_prop_b = forward_flows.new_zeros(n, self.mid_channels, h, w)
 
+#-------# Backward iterate (Recurrent!!!) through each frame index to propagate features.
+        feats_b = []
+        for i in reversed(frame_idx):
+            feat_current = feats['spatial'][i]
+            if i < t:
+                flow_n1 = backward_flows[:, flow_idx[i + 1], :, :, :]
+                cond_n1 = flow_warp(feat_prop_b, flow_n1.permute(0, 2, 3, 1))
+
+                feat_n2, flow_n2, cond_n2 = torch.zeros_like(feat_prop_b), torch.zeros_like(flow_n1), torch.zeros_like(cond_n1)
+
+                if i < t - 1:
+                    feat_n2 = feats_f[i + 2]
+                    flow_n2 = backward_flows[:, flow_idx[i + 2], :, :, :]
+                    flow_n2 = flow_n1 + flow_warp(flow_n2, flow_n1.permute(0, 2, 3, 1))
+                    cond_n2 = flow_warp(feat_n2, flow_n2.permute(0, 2, 3, 1))
+
+                cond = torch.cat([cond_n1, feat_current, cond_n2], dim=1)
+                feat_prop_b = torch.cat([feat_prop_b, feat_n2], dim=1)
+                feat_prop_b = self.deform_align_b[module_name](feat_prop_b, cond, flow_n1, flow_n2)
+
+            feat_b = [feat_current] + [it[i] for it in prev_feats] + [feat_prop_b]
+            feat_b = torch.cat(feat_b, dim=1)
+            feat_prop_b = feat_prop_b + self.backbone_b[module_name](feat_b)
+            feats_b.append(feat_prop_b)
+
+        for i in range(t + 1):
+
+            feat_new.append(self.bagg[module_name](torch.cat([feats_f[i], feats_b[i]], dim=1)))
+
+        feats[module_name] = feat_new
         return feats
 
     def upsample(self, lqs, feats):
@@ -300,20 +306,10 @@ class BasicVSRPlusPlusNet(BaseModule):
         flows_forward, flows_backward = self.compute_flow(lqs_downsample)
 
         # feature propagation
-        for iter_ in [1, 2]:
-            for direction in ['backward', 'forward']:
-                module = f'{direction}_{iter_}'
+        for iter_ in [0, 1]:
+            module_name = str(iter_)
 
-                feats[module] = []
-
-                if direction == 'backward':
-                    flows = flows_backward
-                elif flows_forward is not None:
-                    flows = flows_forward
-                else:
-                    flows = flows_backward.flip(1)
-
-                feats = self.propagate(feats, flows, module)
+            feats = self.propagate(feats, flows_forward, flows_backward, module_name)
 
         return self.upsample(lqs, feats)
 

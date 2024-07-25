@@ -153,7 +153,7 @@ class BaselineVSRNet(BaseModule):
 #-------# Process each frame t using the frames 
         for idx in range(t + 1):
             if idx == 0:
-                # For the first frame, only use current x[1] and next frame x[2] 
+                # For the first frame, only use current frame x[1] and next frame x[2] 
                 frames = [feats[prev_name][idx], 
                           feats[prev_name][idx], 
                           feats[prev_name][idx + 1]]
@@ -163,7 +163,7 @@ class BaselineVSRNet(BaseModule):
                 prop = torch.cat([frames[2], frames[1]], dim=1)
                 frames[2] = self.deform_align[module_name](prop, cond, backward_flow)  # Only next frame needs warping
             elif idx == t:
-                # For the last frame, only use previous x[0] and current frame x[1]
+                # For the last frame, only use previous frame x[0] and current frame x[1]
                 frames = [feats[prev_name][idx - 1], 
                           feats[prev_name][idx], 
                           feats[prev_name][idx]]
@@ -193,8 +193,6 @@ class BaselineVSRNet(BaseModule):
                 cond_b = torch.cat([cond_n1_b, frames[1]], dim=1)
                 prop_b = torch.cat([frames[2], frames[1]], dim=1)
                 frames[2] = self.deform_align[module_name](prop_b, cond_b, backward_flow)
-
-            # Combine the features from the wrapped frames (a list of [B, C, H, W])
 
             feat_tagg = self.tagg[module_name](torch.cat(frames, dim=1))
 
