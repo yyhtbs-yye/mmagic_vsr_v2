@@ -145,56 +145,67 @@ class BaselineVSRPlusPlusNet(BaseModule):
     def propagate(self, feats, forward_flows, backward_flows, layer_id):
 
         n, t, _, h, w = forward_flows.size()
-        new_feats = []  # Initialize new 
 
         module_name = str(layer_id)
-        prev_name = str(layer_id - 1) if layer_id > 0 else 'spatial'
+        pre_module_name = str(layer_id - 1) if layer_id > 0 else 'spatial'
 
-#-------# Process each frame t using the frames 
         for idx in range(t + 1):
-            if idx == 0:
-                # For the first frame, only use current frame x[1] and next frame x[2] 
-                frames = [feats[prev_name][idx], 
-                          feats[prev_name][idx], 
-                          feats[prev_name][idx + 1]]
-                backward_flow_n1 = backward_flows[:, 0, :, :, :]
-                cond_n1 = flow_warp(frames[2], backward_flow_n1.permute(0, 2, 3, 1))
-                cond = torch.cat([cond_n1, frames[1]], dim=1)
-                prop = frames[2]
-                frames[2] = self.deform_align[module_name](prop, cond, backward_flow_n1)  # Only next frame needs warping
-            elif idx == t:
-                # For the last frame, only use previous frame x[0] and current frame x[1]
-                frames = [feats[prev_name][idx - 1], 
-                          feats[prev_name][idx], 
-                          feats[prev_name][idx]]
-                forward_flow_n1 = forward_flows[:, t - 1, :, :, :] # len(forward_flows)=t, last element is idx=t-1
-                cond_n1 = flow_warp(frames[0], forward_flow_n1.permute(0, 2, 3, 1))
-                cond = torch.cat([cond_n1, frames[1]], dim=1)
-                prop = frames[0]
-                frames[0] = self.deform_align[module_name](prop, cond, forward_flow_n1)  # Only previous frame needs warping
-            else:
-                # For other frames, use previous x[0]
-                # , current x[1], and next frames x[2]
-                frames = [feats[prev_name][idx - 1], 
-                          feats[prev_name][idx], 
-                          feats[prev_name][idx + 1]]
-                
-                forward_flow_n1 = forward_flows[:, idx - 1, :, :, :]   # idx=1 -> forward flow index=0
-                backward_flow_n1 = backward_flows[:, idx, :, :, :]     # idx=1 -> backward flow index=1
-                
-                # x[0] -> x[1], using forward
-                cond_n1_f = flow_warp(frames[0], forward_flow_n1.permute(0, 2, 3, 1))
-                cond_f = torch.cat([cond_n1_f, frames[1]], dim=1)
-                feat_tcat_f = frames[0]
-                frames[0] = self.deform_align[module_name](feat_tcat_f, cond_f, forward_flow_n1)
-                
-                # x[2] -> x[1], using backward
-                cond_n1_b = flow_warp(frames[2], backward_flow_n1.permute(0, 2, 3, 1))
-                cond_b = torch.cat([cond_n1_b, frames[1]], dim=1)
-                feat_tcat_b = frames[2]
-                frames[2] = self.deform_align[module_name](feat_tcat_b, cond_b, backward_flow_n1)
+            feat_raw_f = [
+                safe_get_feat(feats[pre_module_name], idx - 2),  # Second-to-last frame
+                safe_get_feat(feats[pre_module_name], idx - 1),  # Previous frame
+                safe_get_feat(feats[pre_module_name], idx)       # Current frame
+            ]
+            
+            flows_f = [
+                safe_get_flow(forward_flows, idx - 2),  # Flow from second-to-last to last frame
+                safe_get_flow(forward_flows, idx - 1)   # Flow from last to current frame
+            ]
+            cond_f_n = [None, None, feat_raw_f[-1]]
 
-            feat_tagg = self.tagg[module_name](torch.cat(frames, dim=1))
+            for j in range(1, -1, -1): # index = [1, 0]
+                if flows_f[j] is None: 
+                    # All other flows are None, return previous warp align
+                    for jj in range(j, -1, -1):
+                        cond_f_n[jj] = cond_f_n[j + 1]
+                    break
+                if j + 1 < len(flows_f):
+                    flows_f[j] = flows_f[j + 1] + flow_warp(flows_f[j], flows_f[j + 1].permute(0, 2, 3, 1))
+
+                cond_f_n[j] = flow_warp(feat_raw_f[j], flows_f[j].permute(0, 2, 3, 1))
+
+            cond_f = torch.cat([it for it in cond_f_n], dim=1)
+            feat_raw_f = torch.cat(feat_raw_f[:-1], dim=1)
+            feat_align_f = self.deform_align[module_name](feat_raw_f, cond_f, flows_f)
+
+            feat_raw_b = [
+                safe_get_feat(feats[pre_module_name], idx + 2),  # Second-to-last frame
+                safe_get_feat(feats[pre_module_name], idx + 1),  # Previous frame
+                safe_get_feat(feats[pre_module_name], idx)       # Current frame
+            ]
+            
+            flows_b = [
+                safe_get_flow(backward_flows, idx + 2),  # Flow from second-to-last to last frame
+                safe_get_flow(backward_flows, idx + 1)   # Flow from last to current frame
+            ]
+            cond_b_n = [None, None, feat_raw_b[-1]]
+
+            for j in range(1, -1, -1): # index = [1, 0]
+                if flows_b[j] is None: 
+                    # All other flows are None, return previous warp align
+                    for jj in range(j, -1, -1):
+                        cond_b_n[jj] = cond_b_n[j + 1]
+                    break
+                if j + 1 < len(flows_b):
+                    flows_b[j] = flows_b[j + 1] + flow_warp(flows_b[j], flows_b[j + 1].permute(0, 2, 3, 1))
+
+                cond_b_n[j] = flow_warp(feat_raw_b[j], flows_b[j].permute(0, 2, 3, 1))
+
+            cond_b = torch.cat([it for it in cond_b_n], dim=1)
+            feat_raw_b = torch.cat(feat_raw_b[:-1], dim=1)
+            feat_align_b = self.deform_align[module_name](feat_raw_b, cond_b, flows_b)
+
+
+            feat_tagg = [feat_align_f, feat_align_b, feats[pre_module_name][idx]]
 
             feat_dense = [feat_tagg] + [feats[k][idx]
                                         for k in feats if k not in ['spatial', module_name]]
@@ -351,3 +362,20 @@ class FirstOrderDeformableAlignment(ModulatedDeformConv2d):
                                        self.stride, self.padding,
                                        self.dilation, self.groups,
                                        self.deform_groups)
+
+def safe_get_feat(feats, idx):
+    """ Returns feature with replicate padding. """
+    max_index = len(feats) - 1
+    if idx < 0:
+        idx = 0
+    elif idx > max_index:
+        idx = max_index
+    return feats[idx]
+
+def safe_get_flow(flows, idx):
+    """ Returns flow with None padding for out of bounds. """
+    if 0 <= idx < len(flows):
+        return flows[idx]
+    else:
+        return None  # No flow data available for this index
+
